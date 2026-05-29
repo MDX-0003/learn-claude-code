@@ -102,6 +102,34 @@ register_hook("PreToolUse", log_hook)          # 通过了才记录
 
 我们设计的Trace Hook则不同，尽管大部分hook都是有实际意义的（影响流程分支），但我们的Trace独立于流程外，只负责log。实现方法也很简单，只返回None，保证`trigger_hooks`触发Trace CallBack以后，不会因为其返回值中断其他CallBack的执行。
 
+**s20总共有哪些hook**
+
+整个 s20 文件里 `register_hook` 只出现了这 5 次。当前钩子列表的完整状态：
+
+| 事件               | 已注册的回调                  | 数量 |
+| ------------------ | ----------------------------- | ---- |
+| `UserPromptSubmit` | `user_prompt_hook`            | 1    |
+| `PreToolUse`       | `permission_hook`, `log_hook` | 2    |
+| `PostToolUse`      | `large_output_hook`           | 1    |
+| `Stop`             | `stop_hook`                   | 1    |
+| `PreModelCall`     | *(空)*                        | 0    |
+| `PostModelCall`    | *(空)*                        | 0    |
+
+PreModelCall 和 PostModelCall是为了Trace而新加的Event，在Main里调用来自`trace\trace_hooks.py`的enable_trace函数以后，才会添加纯Log的Hook Callback
+
+算上Trace用的Callback，则新的列表如下，可见Trace单纯是给每个时间节点(event)创建了一个Log事件。另外前面我们也提到,Trigger_hook遍历callback时，前面的callback如有返回值，就会阻断后续callback的执行
+
+| 事件               | 已注册的回调                                  | 数量 |
+| ------------------ | --------------------------------------------- | ---- |
+| `UserPromptSubmit` | `user_prompt_hook`，on_user_prompt            | 1    |
+| `PreToolUse`       | `permission_hook`, `log_hook`,on_pre_tool_use | 2    |
+| `PostToolUse`      | `large_output_hook`,on_post_tool_use          | 1    |
+| `Stop`             | `stop_hook`,on_stop                           | 1    |
+| `PreModelCall`     | on_pre_model_call                             | 0    |
+| `PostModelCall`    | on_post_model_call                            | 0    |
+
+
+
 ### 你刚看到的运行示例
 
 你输入 `列出你的tools` 后：

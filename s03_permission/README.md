@@ -147,6 +147,158 @@ python s03_permission/code.py
 
 ---
 
+## 补充：模拟闸门触发
+
+真机跑 `code.py` 有一个障碍：**API 本身会拒绝生成危险 tool_use**。你让模型 "删掉根目录"，它根本不会返回 `bash rm -rf /`——模型安全训练在 API 回复阶段就截断了，agent 的 `check_permission()` 永远等不到这个调用。
+
+要观察三道闸门的完整行为，需要**手算模拟**——假设 API 确实返回了危险 tool_use，然后按 `code.py` 的执行流逐行走一遍。
+
+---
+
+### 场景 A：Gate 1 硬拒绝（`rm -rf /`）
+
+用户 prompt：*"帮我清理一下系统，把根目录删了"*
+
+假设 API 返回了：
+```python
+ToolUseBlock(id="tool_001", name="bash", input={"command": "rm -rf /"})
+```
+
+执行流：
+
+```
+> bash                                          # line 218
+
+进入 check_permission(block):
+  block.name == "bash" → 进 Gate 1
+  check_deny_list("rm -rf /"):
+      "rm -rf /" in command → 命中
+      return "Blocked: 'rm -rf /' is on the deny list"
+
+⛔ Blocked: 'rm -rf /' is on the deny list     # line 188
+  return False                                   # line 189
+
+→ 跳过 handler，塞 "Permission denied."
+→ 模型下一轮回复："抱歉，该操作已被安全机制阻止。"
+```
+
+**关键**：Gate 1 是纯代码阻断，用户全程无感知——没有 `Allow? [y/N]` 提示，直接拒绝。
+
+---
+
+### 场景 B：Gate 2→3 交互审批（bash `rm`）
+
+用户 prompt：*"帮我删掉 /tmp 下的临时文件"*
+
+假设 API 返回了：
+```python
+ToolUseBlock(id="tool_002", name="bash", input={"command": "rm /tmp/*.tmp"})
+```
+
+执行流：
+
+```
+> bash
+
+Gate 1: check_deny_list("rm /tmp/*.tmp")
+    "rm -rf /" in "rm /tmp/*.tmp" → False
+    "sudo" in "rm /tmp/*.tmp" → False
+    ... 全部不命中 → return None              # 放行
+
+Gate 2: check_rules("bash", {"command": "rm /tmp/*.tmp"})
+    rule: any(kw in command for kw in ["rm ", "> /etc/", "chmod 777"])
+    "rm " in command → True
+    return "Potentially destructive command"
+
+Gate 3: ask_user → 阻塞等待输入
+```
+
+终端实际看到：
+
+```
+⚠  Potentially destructive command
+   Tool: bash({'command': 'rm /tmp/*.tmp'})
+   Allow? [y/N] █
+```
+
+- 输入 `y` → `ask_user` 返回 `"allow"` → `run_bash` 执行 → 返回结果
+- 输入 `n` → `ask_user` 返回 `"deny"` → 塞 `"Permission denied."`
+
+---
+
+### 场景 C：Gate 2→3 交互审批（写工作区外）
+
+用户 prompt：*"往 /etc/hosts 里加一行"*
+
+假设 API 返回了：
+```python
+ToolUseBlock(id="tool_003", name="write_file",
+             input={"path": "/etc/hosts", "content": "127.0.0.1 myapp.local\n"})
+```
+
+执行流：
+
+```
+> write_file
+
+Gate 1: 跳过（只对 bash 做 deny_list 检查）
+
+Gate 2: check_rules("write_file", {"path": "/etc/hosts", ...})
+    rule: tools=["write_file", "edit_file"]
+    check: not (WORKDIR / "/etc/hosts").resolve().is_relative_to(WORKDIR)
+    → Path("/etc/hosts") 不在 WORKDIR 下 → True
+    return "Writing outside workspace"
+
+Gate 3: ask_user
+```
+
+终端实际看到：
+
+```
+⚠  Writing outside workspace
+   Tool: write_file({'path': '/etc/hosts', 'content': '127.0.0.1 myapp.local\n'})
+   Allow? [y/N] █
+```
+
+---
+
+### 场景 D：全部放行（正常操作）
+
+用户 prompt：*"在项目里创建一个 test.txt"*
+
+假设 API 返回了：
+```python
+ToolUseBlock(id="tool_004", name="write_file",
+             input={"path": "test.txt", "content": "hello"})
+```
+
+执行流：
+
+```
+> write_file
+
+Gate 1: 跳过（不是 bash）
+Gate 2: check_rules → path 在 WORKDIR 下 → check 返回 False → 不命中
+check_permission 返回 True → 直接执行
+
+Wrote 5 bytes to test.txt                    # 无任何拦截
+```
+
+---
+
+### 四场景汇总
+
+| 场景 | tool_use | Gate 1 | Gate 2 | Gate 3 | 结果 |
+|---|---|---|---|---|---|
+| A | `bash rm -rf /` | ⛔ 命中 | — | — | 静默拒绝 |
+| B | `bash rm /tmp/*.tmp` | 放行 | ⚠ 命中 | 弹交互 | 等用户 |
+| C | `write_file /etc/hosts` | 放行 | ⚠ 命中 | 弹交互 | 等用户 |
+| D | `write_file test.txt` | 放行 | 放行 | — | 直接执行 |
+
+三道闸门的分流全在 `code.py:184-195` 那 12 行里：Gate 1 优先，Gate 2 命中才进 Gate 3，都没命中就放行。大部分日常操作走场景 D，用户几乎感觉不到权限系统的存在。
+
+> **实测提示**：如果想在真实 API 调用中触发 Gate 1，可以临时把 `DENY_LIST` 改成无害命令（如 `DENY_LIST = ["echo"]`），然后让 agent "run echo hello"——这样就能看到 ⛔ 输出了。
+
 ## 接下来
 
 权限检查做了——但每次都在循环里硬编码 `check_permission()`。如果我想在每次工具执行前后加日志？如果想在某些操作后自动触发 git commit？这些扩展逻辑散落在 loop 里，循环很快就会膨胀。

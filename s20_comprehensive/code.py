@@ -2051,7 +2051,8 @@ if __name__ == "__main__":
     # Ensure project root is importable (needed for uv run / non-cwd execution)
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
+    
+    # 当enabled为真，从自定义\trace\trace_hooks.py里添加额外注册
     from trace.trace_hooks import enable_trace as enable_trace_logging
     trace_logger, _trace_step = enable_trace_logging(
         register_hook, trace_dir="logs/traces", enabled=False)
