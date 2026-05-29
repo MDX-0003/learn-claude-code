@@ -753,10 +753,14 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                         messages.append({"role": "user",
                             "content": "<inbox>" + json.dumps(non_protocol) + "</inbox>"})
                 try:
+                    trigger_hooks("PreModelCall", messages[-20:],
+                                  {"system_prompt": system}, sub_tools)
                     response = client.messages.create(
                         model=MODEL, system=system, messages=messages[-20:],
                         tools=sub_tools, max_tokens=8000)
+                    trigger_hooks("PostModelCall", response, messages)
                 except Exception:
+                    trigger_hooks("PostModelCall", None, messages)
                     break
                 messages.append({"role": "assistant", "content": response.content})
                 if not has_tool_use(response.content):
@@ -771,9 +775,11 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
                             protocol_ctx["waiting_plan"] = (
                                 match.group(1) if match else output)
                         else:
+                            trigger_hooks("PreToolUse", block)
                             handler = sub_handlers.get(block.name)
                             output = call_tool_handler(handler, block.input,
                                                        block.name)
+                            trigger_hooks("PostToolUse", block, output)
                         results.append({"type": "tool_result",
                                         "tool_use_id": block.id,
                                         "content": str(output)})
@@ -858,7 +864,8 @@ def run_review_plan(request_id: str, approve: bool,
 # Hooks are intentionally outside tool handlers. The loop can add permission,
 # logging, and stop behavior without changing each individual tool.
 HOOKS = {"UserPromptSubmit": [], "PreToolUse": [],
-         "PostToolUse": [], "Stop": []}
+         "PostToolUse": [], "Stop": [],
+         "PreModelCall": [], "PostModelCall": []}
 
 
 def register_hook(event: str, callback):
@@ -918,7 +925,7 @@ def large_output_hook(block, output):
 
 
 def user_prompt_hook(query: str):
-    print(f"\033[90m[HOOK] UserPromptSubmit: {WORKDIR}\033[0m")
+    print(f"\033[90m[HOOK] UserPromptSubmit: \nWorkDir:{WORKDIR}\nQuery:{query}\033[0m")
     return None
 
 
@@ -1005,9 +1012,12 @@ def has_tool_use(content) -> bool:
 def spawn_subagent(description: str) -> str:
     messages = [{"role": "user", "content": description}]
     for _ in range(30):
+        trigger_hooks("PreModelCall", messages,
+                      {"system_prompt": SUB_SYSTEM}, SUB_TOOLS)
         response = client.messages.create(
             model=MODEL, system=SUB_SYSTEM, messages=messages,
             tools=SUB_TOOLS, max_tokens=8000)
+        trigger_hooks("PostModelCall", response, messages)
         messages.append({"role": "assistant", "content": response.content})
         if not has_tool_use(response.content):
             break
@@ -1925,9 +1935,11 @@ def agent_loop(messages: list, context: dict):
         context = update_context(context, messages)
         tools, handlers = assemble_tool_pool()
 
+        trigger_hooks("PreModelCall", messages, context, tools)
         try:
             response = call_llm(messages, context, tools, state, max_tokens)
         except Exception as e:
+            trigger_hooks("PostModelCall", None, messages)
             if is_prompt_too_long_error(e) and not state.has_attempted_reactive_compact:
                 messages[:] = reactive_compact(messages)
                 state.has_attempted_reactive_compact = True
@@ -1935,6 +1947,7 @@ def agent_loop(messages: list, context: dict):
             messages.append({"role": "assistant", "content": [
                 {"type": "text", "text": f"[Error] {type(e).__name__}: {e}"}]})
             return
+        trigger_hooks("PostModelCall", response, messages)
 
         if response.stop_reason == "max_tokens":
             if not state.has_escalated:
@@ -2034,37 +2047,51 @@ def cron_autorun_loop(history: list, context: dict):
 
 if __name__ == "__main__":
     CLI_ACTIVE = True
+
+    # Ensure project root is importable (needed for uv run / non-cwd execution)
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+    from trace.trace_hooks import enable_trace as enable_trace_logging
+    trace_logger, _trace_step = enable_trace_logging(
+        register_hook, trace_dir="logs/traces", enabled=False)
+
     print("s20: comprehensive agent")
     print("Enter a question, press Enter to send. Type q to quit.\n")
     history = []
     context = update_context({}, [])
     threading.Thread(target=cron_autorun_loop,
                      args=(history, context), daemon=True).start()
-    while True:
-        try:
-            query = input(PROMPT)
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        trigger_hooks("UserPromptSubmit", query)
-        turn_start = len(history)
-        history.append({"role": "user", "content": query})
-        with agent_lock:
-            agent_loop(history, context)
-            context = update_context(context, history)
-            print_turn_assistants(history, turn_start)
+    try:
+        while True:
+            try:
+                query = input(PROMPT)
+            except (EOFError, KeyboardInterrupt):
+                break
+            if query.strip().lower() in ("q", "exit", ""):
+                break
+            trigger_hooks("UserPromptSubmit", query)
+            turn_start = len(history)
+            history.append({"role": "user", "content": query})
+            with agent_lock:
+                agent_loop(history, context)
+                print(f"DEBUG: response content types: {[getattr(b,'type','?') for b in history[-1].get('content',[])]}")
+                context = update_context(context, history)
+                print_turn_assistants(history, turn_start)
 
-        inbox = consume_lead_inbox(route_protocol=True)
-        if inbox:
-            def inbox_label(msg):
-                req_id = msg.get("metadata", {}).get("request_id", "")
-                suffix = f" req:{req_id}" if req_id else ""
-                return f"{msg.get('type', 'message')}{suffix}"
+            inbox = consume_lead_inbox(route_protocol=True)
+            if inbox:
+                def inbox_label(msg):
+                    req_id = msg.get("metadata", {}).get("request_id", "")
+                    suffix = f" req:{req_id}" if req_id else ""
+                    return f"{msg.get('type', 'message')}{suffix}"
 
-            inbox_text = "\n".join(
-                f"From {m['from']} [{inbox_label(m)}]: "
-                f"{m['content'][:200]}" for m in inbox)
-            history.append({"role": "user",
-                            "content": f"[Inbox]\n{inbox_text}"})
-        print()
+                inbox_text = "\n".join(
+                    f"From {m['from']} [{inbox_label(m)}]: "
+                    f"{m['content'][:200]}" for m in inbox)
+                history.append({"role": "user",
+                                "content": f"[Inbox]\n{inbox_text}"})
+            print()
+    finally:
+        if trace_logger:
+            trace_logger.finalize()
