@@ -283,7 +283,8 @@ def safe_path(p: str, cwd: Path = None) -> Path:
 def run_bash(command: str, cwd: Path = None) -> str:
     try:
         r = subprocess.run(command, shell=True, cwd=cwd or WORKDIR,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120,
+                           encoding="utf-8", errors="replace")
         out = (r.stdout + r.stderr).strip()
         return out[:50000] if out else "(no output)"
     except subprocess.TimeoutExpired:
@@ -292,7 +293,7 @@ def run_bash(command: str, cwd: Path = None) -> str:
 
 def run_read(path: str, limit: int | None = None, cwd: Path = None) -> str:
     try:
-        lines = safe_path(path, cwd).read_text().splitlines()
+        lines = safe_path(path, cwd).read_text(encoding="utf-8", errors="replace").splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
         return "\n".join(lines)

@@ -391,7 +391,8 @@ def run_bash(command: str, cwd: Path = None,
     # run_in_background is consumed by the dispatcher; direct execution ignores it.
     try:
         r = subprocess.run(command, shell=True, cwd=cwd or WORKDIR,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120,
+                           encoding="utf-8", errors="replace")
         out = (r.stdout + r.stderr).strip()
         return out[:50000] if out else "(no output)"
     except subprocess.TimeoutExpired:
@@ -401,7 +402,7 @@ def run_bash(command: str, cwd: Path = None,
 def run_read(path: str, limit: int | None = None,
              offset: int = 0, cwd: Path = None) -> str:
     try:
-        lines = safe_path(path, cwd).read_text().splitlines()
+        lines = safe_path(path, cwd).read_text(encoding="utf-8", errors="replace").splitlines()
         offset = max(int(offset or 0), 0)
         limit = int(limit) if limit is not None else None
         lines = lines[offset:]
@@ -426,10 +427,10 @@ def run_edit(path: str, old_text: str, new_text: str,
              cwd: Path = None) -> str:
     try:
         fp = safe_path(path, cwd)
-        text = fp.read_text()
+        text = fp.read_text(encoding="utf-8", errors="replace")
         if old_text not in text:
             return f"Error: text not found in {path}"
-        fp.write_text(text.replace(old_text, new_text, 1))
+        fp.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"

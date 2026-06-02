@@ -176,6 +176,9 @@ toolu_01D7FLrfh4GYq7yT1ULFeyMV
 
 ## 3. `response.stop_reason`：`StopReason`
 
+StopReason ： 引擎停止生成 token 了，原因是什么
+"stop" 的对象就是 token generation stream（token 生成流）
+
 ```python
 # 定义: anthropic/types/stop_reason.py
 StopReason = Literal[

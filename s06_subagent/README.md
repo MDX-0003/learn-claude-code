@@ -99,6 +99,60 @@ TOOL_HANDLERS["task"] = spawn_subagent
 
 dispatch 机制不变，task 工具通过 `TOOL_HANDLERS[block.name]` 分发。子 Agent 有独立的 `SUB_SYSTEM` 提示，明确要求"直接完成任务，不要再委派"。
 
+## 其他代码细节
+
+Anthropic API 的 `response.content` 是一个列表，条目是内容块对象：
+
+```python
+response.content = [
+    ContentBlock(type="text",    text="我来分析一下……"),
+    ContentBlock(type="tool_use", name="bash", input={...}),
+]
+```
+
+`extract_text` 做的事：**从这个列表里捞出所有 `type == "text"` 的块，拼成纯字符串**。
+
+```python
+def extract_text(content) -> str:
+    if not isinstance(content, list):
+        return str(content)          # 兼容纯字符串（如初始 user 消息）
+    return "\n".join(
+        getattr(b, "text", "")       # 取 .text 属性
+        for b in content
+        if getattr(b, "type", None) == "text"  # 只保留 type==text的ContentBlock
+    )
+```
+
+extract_text只对最后一条message调用，换言之，如果最后一条message是"tool_use"，那么我们不会用tool结果作为subagent的结论。
+
+```
+result = extract_text(messages[-1]["content"])
+```
+
+下一个问题是message都有哪些？
+
+从代码上看，有三种可能：用户提示词、llm回复（role=  助手）、工具调用（role = user）
+
+extract_text以及后面的fallback都是为了保证**只取assistant的最后一条TextBlock**作为subagent的返回上下文。
+
+```
+messages = [{"role": "user", "content": description}]
+messages.append({"role": "assistant", "content": response.content})
+messages.append({"role": "user", "content": results})
+```
+
+下面是一段示例message.content，message可以是用户的提示词（下文一），可以是llm 回复的contentBlock（下文二），也可以是工具调用的结果（下文三）
+
+```
+{'role': 'user', 'content': 'Create slugify module in s06_subagent'}
+
+{'role': 'assistant', 'content': [ThinkingBlock(signature='e79d8b3c-f497-4d1d-9405-93ac4c074205', thinking="The user wants me to create a slugify module in a directory called `s06_subagent`. Let me first explore the project structure to understand what's already there and what conventions are being used.", type='thinking'), ToolUseBlock(id='call_00_r9H5DFftQzkc9ZbY1TCg8527', caller=None, input={'pattern': '*'}, name='glob', type='tool_use'), ToolUseBlock(id='call_01_0EBbnNMnnUx6l7DuERQu4275', caller=None, input={'command': 'ls -la'}, name='bash', type='tool_use')]}
+
+{'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'call_00_r9H5DFftQzkc9ZbY1TCg8527', 'content': 'agents\ndocs\nLICENSE\nlogs\nNotes\nREADME-ja.md\nREADME-zh.md\nREADME.md\nrequirements.txt\ns01_agent_loop\ns02_tool_use\ns03_permission\ns04_hooks\ns05_todo_write\ns06_subagent\ns07_skill_loading\ns08_context_compact\ns09_memory\ns10_system_prompt\ns11_error_recovery\ns12_task_system\ns13_background_tasks\ns14_cron_scheduler\ns15_agent_teams\ns16_team_protocols\ns17_autonomous_agents\ns18_worktree_isolation\ns19_mcp_plugin\ns20_comprehensive\nskills\ntests\ntrace\nweb'}, {'type': 'tool_result', 'tool_use_id': 'call_01_0EBbnNMnnUx6l7DuERQu4275', 'content': "'ls' 不是内部或外部命令，也不是可运行的程序\n或批处理文件。"}]}
+```
+
+
+
 ---
 
 ## 相对 s05 的变更
